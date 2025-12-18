@@ -316,7 +316,7 @@
       "-Wextra",
       "-ferror-limit",
       "19",
-      "-fmessage-length=147",
+      "-fmessage-length=104",
       "-funroll-loops",
       "-fgnuc-version=4.2.1",
       "-fskip-odr-check-in-gmf",
@@ -328,11 +328,11 @@
       "-x",
       "c",
       "-o",
-      "/tmp/shell-fceca2.o",
+      "/tmp/shell-4c4b18.o",
       "shell.c"
     ],
     "directory": "/home/wafi/coding/shell",
     "file": "/home/wafi/coding/shell/shell.c",
-    "output": "/tmp/shell-fceca2.o"
+    "output": "/tmp/shell-4c4b18.o"
   }
 ]

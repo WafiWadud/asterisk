@@ -171,6 +171,118 @@ int is_variable_assignment(const char *cmd) {
   return 1;
 }
 
+// Helper function to handle variable assignment with arithmetic
+void handle_assignment(const char *cmd) {
+  char *cmd_copy = strdup(cmd);
+  char *eq = strchr(cmd_copy, '=');
+  if (!eq) {
+    free(cmd_copy);
+    return;
+  }
+
+  *eq = 0;
+  char *name = cmd_copy;
+  char *val = eq + 1;
+
+  // Handle arithmetic expansion $[expression]
+  if (val[0] == '$' && val[1] == '[') {
+    char *expr_start = val + 2; // Skip "$["
+    size_t len = strlen(expr_start);
+    if (len > 0 && expr_start[len - 1] == ']') {
+      expr_start[len - 1] = '\0'; // Remove trailing ']'
+
+      // Expand any variables in the expression first
+      char *expanded_expr = expand_variables(expr_start);
+
+      // Simple arithmetic evaluation
+      char *ptr = expanded_expr;
+      long result = 0;
+      long current = 0;
+      char op = '+';
+      int has_value = 0;
+
+      while (*ptr) {
+        // Skip whitespace
+        while (*ptr == ' ')
+          ptr++;
+
+        if (*ptr >= '0' && *ptr <= '9') {
+          // Parse number
+          current = strtol(ptr, &ptr, 10);
+          has_value = 1;
+        } else if (*ptr == '+' || *ptr == '-' || *ptr == '*' || *ptr == '/' ||
+                   *ptr == '%') {
+          if (has_value) {
+            // Apply current operation
+            switch (op) {
+            case '+':
+              result += current;
+              break;
+            case '-':
+              result -= current;
+              break;
+            case '*':
+              result *= current;
+              break;
+            case '/':
+              if (current != 0)
+                result /= current;
+              break;
+            case '%':
+              if (current != 0)
+                result %= current;
+              break;
+            }
+            current = 0;
+            has_value = 0;
+          }
+          op = *ptr;
+          ptr++;
+        } else {
+          // Skip unknown characters
+          ptr++;
+        }
+      }
+
+      // Apply final operation
+      if (has_value) {
+        switch (op) {
+        case '+':
+          result += current;
+          break;
+        case '-':
+          result -= current;
+          break;
+        case '*':
+          result *= current;
+          break;
+        case '/':
+          if (current != 0)
+            result /= current;
+          break;
+        case '%':
+          if (current != 0)
+            result %= current;
+          break;
+        }
+      }
+
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%ld", result);
+      set_var(name, buf);
+      free(expanded_expr);
+      free(cmd_copy);
+      return;
+    }
+  }
+
+  // Regular variable assignment
+  char *expanded_val = expand_variables(val);
+  set_var(name, expanded_val);
+  free(expanded_val);
+  free(cmd_copy);
+}
+
 // =====================
 // Tokenize
 // =====================
@@ -233,106 +345,7 @@ void run_command(char **argv) {
 
   // Handle variable assignments in the parent process
   if (strchr(argv[0], '=') && argv[0][0] != '$') {
-    char *eq = strchr(argv[0], '=');
-    *eq = 0;
-    char *name = argv[0];
-    char *val = eq + 1;
-
-    // Handle arithmetic expansion $[expression]
-    if (val[0] == '$' && val[1] == '[') {
-      char *expr_start = val + 2; // Skip "$["
-      size_t len = strlen(expr_start);
-      if (len > 0 && expr_start[len - 1] == ']') {
-        expr_start[len - 1] = '\0'; // Remove trailing ']'
-
-        // Expand any variables in the expression first
-        char *expanded_expr = expand_variables(expr_start);
-
-        // Simple arithmetic evaluation
-        char *ptr = expanded_expr;
-        long result = 0;
-        long current = 0;
-        char op = '+';
-        int has_value = 0;
-
-        while (*ptr) {
-          // Skip whitespace
-          while (*ptr == ' ')
-            ptr++;
-
-          if (*ptr >= '0' && *ptr <= '9') {
-            // Parse number
-            current = strtol(ptr, &ptr, 10);
-            has_value = 1;
-          } else if (*ptr == '+' || *ptr == '-' || *ptr == '*' || *ptr == '/' ||
-                     *ptr == '%') {
-            if (has_value) {
-              // Apply current operation
-              switch (op) {
-              case '+':
-                result += current;
-                break;
-              case '-':
-                result -= current;
-                break;
-              case '*':
-                result *= current;
-                break;
-              case '/':
-                if (current != 0)
-                  result /= current;
-                break;
-              case '%':
-                if (current != 0)
-                  result %= current;
-                break;
-              }
-              current = 0;
-              has_value = 0;
-            }
-            op = *ptr;
-            ptr++;
-          } else {
-            // Skip unknown characters
-            ptr++;
-          }
-        }
-
-        // Apply final operation
-        if (has_value) {
-          switch (op) {
-          case '+':
-            result += current;
-            break;
-          case '-':
-            result -= current;
-            break;
-          case '*':
-            result *= current;
-            break;
-          case '/':
-            if (current != 0)
-              result /= current;
-            break;
-          case '%':
-            if (current != 0)
-              result %= current;
-            break;
-          }
-        }
-
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%ld", result);
-        set_var(name, buf);
-        free(expanded_expr);
-        return;
-      }
-    }
-
-    // Regular variable assignment
-    char *expanded_val = expand_variables(val);
-    set_var(name, expanded_val);
-    free(expanded_val);
+    handle_assignment(argv[0]);
     return;
   }
 
@@ -447,6 +460,10 @@ int eval_condition(const char *cond) {
 // =====================
 void execute_flow(const char *line) {
   if (strncmp(line, "repeat-until", 12) == 0) {
+    printf("repeat-until is buggy at best, only works for single command... no "
+           "idea why. Fix later.");
+    // TODO: FIX
+
     // Create a modifiable copy of the input line
     char *line_copy = strdup(line);
     if (!line_copy) {
@@ -520,18 +537,27 @@ void execute_flow(const char *line) {
           *(end + 1) = '\0';
 
           if (*start) {
-            char *subbed = substitute_commands(start);
-            char *expanded = expand_variables(subbed);
-            free(subbed);
+            // Check if this is a variable assignment first
+            if (is_variable_assignment(start)) {
+              char *subbed = substitute_commands(start);
+              char *expanded = expand_variables(subbed);
+              free(subbed);
+              handle_assignment(expanded);
+              free(expanded);
+            } else {
+              char *subbed = substitute_commands(start);
+              char *expanded = expand_variables(subbed);
+              free(subbed);
 
-            char **tokens = tokenize(expanded);
-            if (tokens && tokens[0]) {
-              char **globbed = expand_globs(tokens);
-              run_command(globbed);
-              free_tokens(globbed);
+              char **tokens = tokenize(expanded);
+              if (tokens && tokens[0]) {
+                char **globbed = expand_globs(tokens);
+                run_command(globbed);
+                free_tokens(globbed);
+              }
+              free_tokens(tokens);
+              free(expanded);
             }
-            free_tokens(tokens);
-            free(expanded);
           }
 
           part = strtok(NULL, ";");
@@ -571,18 +597,27 @@ void execute_flow(const char *line) {
           *(end + 1) = '\0';
 
           if (strlen(part) > 0) {
-            char *subbed = substitute_commands(part);
-            char *expanded = expand_variables(subbed);
-            free(subbed);
+            // Check if this is a variable assignment
+            if (is_variable_assignment(part)) {
+              char *subbed = substitute_commands(part);
+              char *expanded = expand_variables(subbed);
+              free(subbed);
+              handle_assignment(expanded);
+              free(expanded);
+            } else {
+              char *subbed = substitute_commands(part);
+              char *expanded = expand_variables(subbed);
+              free(subbed);
 
-            char **tokens = tokenize(expanded);
-            if (tokens && tokens[0]) {
-              char **globbed = expand_globs(tokens);
-              run_command(globbed);
-              free_tokens(globbed);
+              char **tokens = tokenize(expanded);
+              if (tokens && tokens[0]) {
+                char **globbed = expand_globs(tokens);
+                run_command(globbed);
+                free_tokens(globbed);
+              }
+              free_tokens(tokens);
+              free(expanded);
             }
-            free_tokens(tokens);
-            free(expanded);
           }
 
           part = strtok(NULL, ";");
