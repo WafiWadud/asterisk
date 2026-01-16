@@ -28,15 +28,26 @@ A lightweight, feature-rich shell implementation written in C.
 **Requirements:**
 - GCC or Clang
 - GNU Readline development library (`readline-devel` or `libreadline-dev`)
+- OR Editline development library (`libedit-dev`) for a lighter alternative
 
-**Compile:**
+**Compile with GNU Readline:**
 ```bash
 gcc -o ash shell.c -lreadline
+```
+
+**Compile with Editline:**
+```bash
+gcc -DEDITLINE_ENABLED -o ash shell.c -leditline
 ```
 
 Or with additional debugging:
 ```bash
 gcc -g -Wall -o ash shell.c -lreadline
+```
+
+Or with Editline and debugging:
+```bash
+gcc -g -Wall -DEDITLINE_ENABLED -o ash shell.c -leditline
 ```
 
 **Run:**
