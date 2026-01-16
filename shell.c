@@ -10,8 +10,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifdef EDITLINE_ENABLED
+#include <editline/readline.h>
+#else
 #include <readline/history.h>
 #include <readline/readline.h>
+#endif /* EDITLINE_ENABLED */
 
 // =====================
 // Variables
@@ -708,7 +712,10 @@ void execute_flow(const char *line) {
 // =====================
 int main(void) {
   printf("Asterix SHell, v0.8\n");
+
+#ifndef EDITLINE_ENABLED
   using_history();
+#endif
 
   while (1) {
     char *input = readline("asterix> ");
