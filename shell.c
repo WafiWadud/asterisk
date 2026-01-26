@@ -13,12 +13,23 @@
 #ifdef EDITLINE_ENABLED
 #include <editline/readline.h>
 #else
+#define READLINE_ENABLED
+#endif
+
+#ifdef READLINE_ENABLED
 #include <readline/history.h>
 #include <readline/readline.h>
-#endif /* EDITLINE_ENABLED */
+#endif
 
 // =====================
-// Variables
+// Macros & Constants
+// =====================
+#define BUFFER_SIZE 4096
+#define MAX_TOKENS 256
+#define MAX_VAR_NAME 256
+
+// =====================
+// Variable Storage
 // =====================
 typedef struct Var {
   char *name;
@@ -28,7 +39,20 @@ typedef struct Var {
 
 static Var *vars = NULL;
 
+void free_vars(void) {
+  while (vars) {
+    Var *tmp = vars;
+    vars = vars->next;
+    free(tmp->name);
+    free(tmp->value);
+    free(tmp);
+  }
+}
+
 void set_var(const char *name, const char *value) {
+  if (!name || !value)
+    return;
+
   for (Var *v = vars; v; v = v->next) {
     if (strcmp(v->name, name) == 0) {
       free(v->value);
@@ -37,7 +61,10 @@ void set_var(const char *name, const char *value) {
       return;
     }
   }
+
   Var *v = malloc(sizeof(Var));
+  if (!v)
+    return;
   v->name = strdup(name);
   v->value = strdup(value);
   v->next = vars;
@@ -46,25 +73,72 @@ void set_var(const char *name, const char *value) {
 }
 
 const char *get_var(const char *name) {
+  if (!name)
+    return "";
+
   for (Var *v = vars; v; v = v->next)
     if (strcmp(v->name, name) == 0)
       return v->value;
+
   const char *env = getenv(name);
   return env ? env : "";
 }
 
 // =====================
-// Command substitution
+// String Utilities
+// =====================
+char *safe_strndup(const char *str, size_t len) {
+  if (!str)
+    return calloc(1, 1);
+  char *out = malloc(len + 1);
+  if (!out)
+    return NULL;
+  strncpy(out, str, len);
+  out[len] = '\0';
+  return out;
+}
+
+void trim_string(char *str) {
+  if (!str || !*str)
+    return;
+
+  // Trim leading
+  size_t start = 0;
+  while (isspace((unsigned char)str[start]))
+    start++;
+
+  // Trim trailing
+  size_t end = strlen(str);
+  while (end > start && isspace((unsigned char)str[end - 1]))
+    end--;
+
+  // Move
+  if (start > 0)
+    memmove(str, str + start, end - start);
+  str[end - start] = '\0';
+}
+
+// =====================
+// Command Substitution
 // =====================
 char *substitute_commands(const char *input) {
-  char *out = malloc(strlen(input) * 2 + 1);
+  if (!input)
+    return calloc(1, 1);
+
+  char *out = malloc(BUFFER_SIZE);
+  if (!out)
+    return calloc(1, 1);
+
+  size_t out_len = BUFFER_SIZE;
   size_t j = 0;
+
   for (size_t i = 0; input[i]; i++) {
     if ((input[i] == '`') || (input[i] == '$' && input[i + 1] == '(')) {
       int backtick = (input[i] == '`');
       i += backtick ? 1 : 2;
       size_t start = i;
       int depth = 1;
+
       while (input[i] && depth > 0) {
         if (!backtick && input[i] == '(')
           depth++;
@@ -74,8 +148,10 @@ char *substitute_commands(const char *input) {
           break;
         i++;
       }
-      size_t cmd_len = i - start;
-      char *cmd = strndup(input + start, cmd_len);
+
+      char *cmd = safe_strndup(input + start, i - start);
+      if (!cmd)
+        continue;
 
       FILE *fp = popen(cmd, "r");
       free(cmd);
@@ -87,66 +163,134 @@ char *substitute_commands(const char *input) {
         size_t len = strlen(buf);
         if (len && buf[len - 1] == '\n')
           buf[len - 1] = 0;
-        j += sprintf(out + j, "%s", buf);
+
+        // Ensure buffer has space
+        while (j + len >= out_len) {
+          out_len *= 2;
+          out = realloc(out, out_len);
+          if (!out) {
+            pclose(fp);
+            return calloc(1, 1);
+          }
+        }
+
+        memcpy(out + j, buf, len);
+        j += len;
       }
       pclose(fp);
+
       if (!backtick)
         ;
       else
         i++;
     } else {
+      // Ensure buffer has space
+      if (j + 1 >= out_len) {
+        out_len *= 2;
+        out = realloc(out, out_len);
+        if (!out)
+          return calloc(1, 1);
+      }
       out[j++] = input[i];
     }
   }
+
   out[j] = '\0';
   return out;
 }
 
 // =====================
-// Variable expansion
+// Variable Expansion
 // =====================
 char *expand_variables(const char *input) {
-  size_t len = strlen(input);
-  char *out = malloc(len * 2 + 1);
+  if (!input)
+    return calloc(1, 1);
+
+  char *out = malloc(BUFFER_SIZE);
+  if (!out)
+    return calloc(1, 1);
+
+  size_t out_len = BUFFER_SIZE;
   size_t j = 0;
+  size_t len = strlen(input);
 
   for (size_t i = 0; i < len; i++) {
-    if (input[i] == '\\') {
-      if (input[i + 1])
-        out[j++] = input[++i];
+    if (input[i] == '\\' && input[i + 1]) {
+      if (j + 1 >= out_len) {
+        out_len *= 2;
+        out = realloc(out, out_len);
+        if (!out)
+          return calloc(1, 1);
+      }
+      out[j++] = input[++i];
       continue;
     }
+
     if (input[i] == '$') {
       i++;
+      const char *val = NULL;
+
       if (input[i] == '{') {
+        // ${VAR_NAME} format
         i++;
         size_t start = i;
         while (input[i] && input[i] != '}')
           i++;
+
         if (input[i] == '}') {
+          char name[MAX_VAR_NAME];
           size_t nlen = i - start;
-          char name[256];
-          strncpy(name, input + start, nlen);
-          name[nlen] = '\0';
-          const char *val = get_var(name);
-          j += sprintf(out + j, "%s", val);
+          if (nlen < MAX_VAR_NAME) {
+            strncpy(name, input + start, nlen);
+            name[nlen] = '\0';
+            val = get_var(name);
+          }
         }
       } else if (isalpha((unsigned char)input[i]) || input[i] == '_') {
+        // $VAR_NAME format
         size_t start = i;
         while (isalnum((unsigned char)input[i]) || input[i] == '_')
           i++;
+
+        char name[MAX_VAR_NAME];
         size_t nlen = i - start;
-        char name[256];
-        strncpy(name, input + start, nlen);
-        name[nlen] = '\0';
-        const char *val = get_var(name);
-        j += sprintf(out + j, "%s", val);
+        if (nlen < MAX_VAR_NAME) {
+          strncpy(name, input + start, nlen);
+          name[nlen] = '\0';
+          val = get_var(name);
+        }
         i--;
       } else {
+        // Not a variable reference
+        if (j + 1 >= out_len) {
+          out_len *= 2;
+          out = realloc(out, out_len);
+          if (!out)
+            return calloc(1, 1);
+        }
         out[j++] = '$';
         i--;
+        continue;
+      }
+
+      if (val) {
+        size_t val_len = strlen(val);
+        while (j + val_len >= out_len) {
+          out_len *= 2;
+          out = realloc(out, out_len);
+          if (!out)
+            return calloc(1, 1);
+        }
+        memcpy(out + j, val, val_len);
+        j += val_len;
       }
     } else {
+      if (j + 1 >= out_len) {
+        out_len *= 2;
+        out = realloc(out, out_len);
+        if (!out)
+          return calloc(1, 1);
+      }
       out[j++] = input[i];
     }
   }
@@ -155,156 +299,33 @@ char *expand_variables(const char *input) {
   return out;
 }
 
-// Check if a command is a variable assignment
-int is_variable_assignment(const char *cmd) {
-  if (!cmd || !*cmd)
-    return 0;
-  if (cmd[0] == '$')
-    return 0; // Don't treat $... as assignment
-
-  char *eq = strchr(cmd, '=');
-  if (!eq)
-    return 0;
-
-  // Check if there's text before the '='
-  for (const char *p = cmd; p < eq; p++) {
-    if (!isalnum((unsigned char)*p) && *p != '_') {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-// Helper function to handle variable assignment with arithmetic
-void handle_assignment(const char *cmd) {
-  char *cmd_copy = strdup(cmd);
-  char *eq = strchr(cmd_copy, '=');
-  if (!eq) {
-    free(cmd_copy);
-    return;
-  }
-
-  *eq = 0;
-  char *name = cmd_copy;
-  char *val = eq + 1;
-
-  // Handle arithmetic expansion $[expression]
-  if (val[0] == '$' && val[1] == '[') {
-    char *expr_start = val + 2; // Skip "$["
-    size_t len = strlen(expr_start);
-    if (len > 0 && expr_start[len - 1] == ']') {
-      expr_start[len - 1] = '\0'; // Remove trailing ']'
-
-      // Expand any variables in the expression first
-      char *expanded_expr = expand_variables(expr_start);
-
-      // Simple arithmetic evaluation
-      char *ptr = expanded_expr;
-      long result = 0;
-      long current = 0;
-      char op = '+';
-      int has_value = 0;
-
-      while (*ptr) {
-        // Skip whitespace
-        while (*ptr == ' ')
-          ptr++;
-
-        if (*ptr >= '0' && *ptr <= '9') {
-          // Parse number
-          current = strtol(ptr, &ptr, 10);
-          has_value = 1;
-        } else if (*ptr == '+' || *ptr == '-' || *ptr == '*' || *ptr == '/' ||
-                   *ptr == '%') {
-          if (has_value) {
-            // Apply current operation
-            switch (op) {
-            case '+':
-              result += current;
-              break;
-            case '-':
-              result -= current;
-              break;
-            case '*':
-              result *= current;
-              break;
-            case '/':
-              if (current != 0)
-                result /= current;
-              break;
-            case '%':
-              if (current != 0)
-                result %= current;
-              break;
-            }
-            current = 0;
-            has_value = 0;
-          }
-          op = *ptr;
-          ptr++;
-        } else {
-          // Skip unknown characters
-          ptr++;
-        }
-      }
-
-      // Apply final operation
-      if (has_value) {
-        switch (op) {
-        case '+':
-          result += current;
-          break;
-        case '-':
-          result -= current;
-          break;
-        case '*':
-          result *= current;
-          break;
-        case '/':
-          if (current != 0)
-            result /= current;
-          break;
-        case '%':
-          if (current != 0)
-            result %= current;
-          break;
-        }
-      }
-
-      char buf[64];
-      snprintf(buf, sizeof(buf), "%ld", result);
-      set_var(name, buf);
-      free(expanded_expr);
-      free(cmd_copy);
-      return;
-    }
-  }
-
-  // Regular variable assignment
-  char *expanded_val = expand_variables(val);
-  set_var(name, expanded_val);
-  free(expanded_val);
-  free(cmd_copy);
-}
-
 // =====================
-// Tokenize
+// Tokenization
 // =====================
-char **tokenize(const char *line) {
-  size_t size = 8, i = 0;
-  char **tokens = malloc(size * sizeof(char *));
-  const char *delim = " \t\r\n";
-  char *copy = strdup(line);
-  char *token = strtok(copy, delim);
-  while (token) {
-    if (i + 1 >= size) {
-      size *= 2;
-      tokens = realloc(tokens, size * sizeof(char *));
-    }
-    tokens[i++] = strdup(token);
-    token = strtok(NULL, delim);
+char **tokenize(const char *input) {
+  if (!input || !*input)
+    return calloc(1, sizeof(char *));
+
+  char *copy = strdup(input);
+  if (!copy)
+    return calloc(1, sizeof(char *));
+
+  char **tokens = malloc(MAX_TOKENS * sizeof(char *));
+  if (!tokens) {
+    free(copy);
+    return calloc(1, sizeof(char *));
   }
-  tokens[i] = NULL;
+
+  int count = 0;
+  char *ptr = copy;
+  char *token;
+
+  while ((token = strtok(ptr, " \t")) && count < MAX_TOKENS - 1) {
+    tokens[count++] = strdup(token);
+    ptr = NULL;
+  }
+  tokens[count] = NULL;
+
   free(copy);
   return tokens;
 }
@@ -318,273 +339,423 @@ void free_tokens(char **tokens) {
 }
 
 // =====================
-// Globbing expansion
+// Glob Expansion
 // =====================
 char **expand_globs(char **tokens) {
+  if (!tokens || !tokens[0])
+    return tokens;
+
+  char **result = malloc(MAX_TOKENS * sizeof(char *));
+  if (!result)
+    return tokens;
+
+  int result_count = 0;
   glob_t globbuf;
-  char **expanded = NULL;
-  size_t total = 0;
 
-  for (size_t i = 0; tokens[i]; i++) {
-    memset(&globbuf, 0, sizeof(globbuf));
-    int ret = glob(tokens[i], GLOB_NOCHECK | GLOB_TILDE, NULL, &globbuf);
-    for (size_t j = 0; j < globbuf.gl_pathc; j++) {
-      expanded = realloc(expanded, sizeof(char *) * (total + 2));
-      expanded[total++] = strdup(globbuf.gl_pathv[j]);
+  for (int i = 0; tokens[i] && result_count < MAX_TOKENS - 1; i++) {
+    if (glob(tokens[i], GLOB_NOCHECK, NULL, &globbuf) == 0) {
+      for (size_t j = 0; j < globbuf.gl_pathc && result_count < MAX_TOKENS - 1;
+           j++) {
+        result[result_count++] = strdup(globbuf.gl_pathv[j]);
+      }
+      globfree(&globbuf);
+    } else {
+      result[result_count++] = strdup(tokens[i]);
     }
-    globfree(&globbuf);
   }
+  result[result_count] = NULL;
 
-  if (expanded)
-    expanded[total] = NULL;
-  return expanded ? expanded : tokens;
+  free_tokens(tokens);
+  return result;
 }
 
 // =====================
-// Execute commands with pipes and redirections
+// Condition Evaluation
 // =====================
-void run_command(char **argv) {
-  if (!argv[0])
-    return;
+int eval_condition(const char *cond) {
+  if (!cond || !*cond)
+    return 0;
 
-  // Handle variable assignments in the parent process
-  if (strchr(argv[0], '=') && argv[0][0] != '$') {
-    handle_assignment(argv[0]);
-    return;
+  char *copy = strdup(cond);
+  if (!copy)
+    return 0;
+
+  trim_string(copy);
+
+  int result = 0;
+
+  // Simple comparisons
+  if (strstr(copy, "==")) {
+    char *left = copy;
+    char *right = strstr(copy, "==") + 2;
+    *strstr(copy, "==") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = strcmp(left, right) == 0;
+  } else if (strstr(copy, "!=")) {
+    char *left = copy;
+    char *right = strstr(copy, "!=") + 2;
+    *strstr(copy, "!=") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = strcmp(left, right) != 0;
+  } else if (strstr(copy, "<=")) {
+    char *left = copy;
+    char *right = strstr(copy, "<=") + 2;
+    *strstr(copy, "<=") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = atoi(left) <= atoi(right);
+  } else if (strstr(copy, ">=")) {
+    char *left = copy;
+    char *right = strstr(copy, ">=") + 2;
+    *strstr(copy, ">=") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = atoi(left) >= atoi(right);
+  } else if (strstr(copy, "<")) {
+    char *left = copy;
+    char *right = strstr(copy, "<") + 1;
+    *strstr(copy, "<") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = atoi(left) < atoi(right);
+  } else if (strstr(copy, ">")) {
+    char *left = copy;
+    char *right = strstr(copy, ">") + 1;
+    *strstr(copy, ">") = '\0';
+
+    trim_string(left);
+    trim_string(right);
+
+    result = atoi(left) > atoi(right);
+  } else {
+    // Check if string is not empty
+    result = strlen(copy) > 0;
   }
 
-  // For non-variable commands, execute in child process
-  int pipefd[2];
-  int has_pipe = 0;
-  int split = -1;
-  for (int i = 0; argv[i]; i++) {
-    if (strcmp(argv[i], "|") == 0) {
-      argv[i] = NULL;
-      split = i;
-      has_pipe = 1;
-      break;
+  free(copy);
+  return result;
+}
+
+// =====================
+// Arithmetic Evaluation
+// =====================
+long eval_arithmetic(const char *expr) {
+  if (!expr || !*expr)
+    return 0;
+
+  char *expanded = expand_variables(expr);
+  char *copy = strdup(expanded);
+  free(expanded);
+
+  if (!copy)
+    return 0;
+
+  long result = 0;
+  long current = 0;
+  char op = '+';
+  char *ptr = copy;
+
+  while (*ptr) {
+    // Skip whitespace
+    while (*ptr == ' ')
+      ptr++;
+
+    if (*ptr >= '0' && *ptr <= '9') {
+      current = strtol(ptr, &ptr, 10);
+    } else if (*ptr == '+' || *ptr == '-' || *ptr == '*' || *ptr == '/' ||
+               *ptr == '%') {
+      // Apply previous operation
+      switch (op) {
+      case '+':
+        result += current;
+        break;
+      case '-':
+        result -= current;
+        break;
+      case '*':
+        result *= current;
+        break;
+      case '/':
+        if (current != 0)
+          result /= current;
+        break;
+      case '%':
+        if (current != 0)
+          result %= current;
+        break;
+      }
+      current = 0;
+      op = *ptr;
+      ptr++;
+    } else {
+      ptr++;
     }
   }
 
-  if (has_pipe)
-    pipe(pipefd);
+  // Apply final operation
+  switch (op) {
+  case '+':
+    result += current;
+    break;
+  case '-':
+    result -= current;
+    break;
+  case '*':
+    result *= current;
+    break;
+  case '/':
+    if (current != 0)
+      result /= current;
+    break;
+  case '%':
+    if (current != 0)
+      result %= current;
+    break;
+  }
 
+  free(copy);
+  return result;
+}
+
+// =====================
+// Variable Assignment
+// =====================
+int is_variable_assignment(const char *cmd) {
+  if (!cmd || !*cmd || cmd[0] == '$')
+    return 0;
+
+  char *eq = strchr(cmd, '=');
+  if (!eq)
+    return 0;
+
+  // Check if all chars before '=' are valid var name chars
+  for (const char *p = cmd; p < eq; p++) {
+    if (!isalnum((unsigned char)*p) && *p != '_')
+      return 0;
+  }
+  return 1;
+}
+
+void handle_assignment(const char *cmd) {
+  if (!cmd || !*cmd)
+    return;
+
+  char *copy = strdup(cmd);
+  if (!copy)
+    return;
+
+  char *eq = strchr(copy, '=');
+  if (!eq) {
+    free(copy);
+    return;
+  }
+
+  *eq = '\0';
+  char *name = copy;
+  char *val = eq + 1;
+
+  // Handle arithmetic expansion $[expression]
+  if (val[0] == '$' && val[1] == '[') {
+    char *expr_start = val + 2;
+    size_t len = strlen(expr_start);
+    if (len > 0 && expr_start[len - 1] == ']') {
+      expr_start[len - 1] = '\0';
+      long result = eval_arithmetic(expr_start);
+
+      char buf[64];
+      snprintf(buf, sizeof(buf), "%ld", result);
+      set_var(name, buf);
+    }
+  } else {
+    set_var(name, val);
+  }
+
+  free(copy);
+}
+
+// =====================
+// Command Execution
+// =====================
+void run_command(char **args) {
+  if (!args || !args[0])
+    return;
+
+  // Handle built-in commands
+  if (strcmp(args[0], "cd") == 0) {
+    const char *dir = args[1] ? args[1] : getenv("HOME");
+    if (chdir(dir) != 0) {
+      perror("cd");
+    }
+    return;
+  }
+
+  if (strcmp(args[0], "echo") == 0) {
+    for (int i = 1; args[i]; i++) {
+      printf("%s", args[i]);
+      if (args[i + 1])
+        printf(" ");
+    }
+    printf("\n");
+    return;
+  }
+
+  // Fork and execute external command
   pid_t pid = fork();
   if (pid == 0) {
-    if (has_pipe) {
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[0]);
-      close(pipefd[1]);
-    }
-
-    for (int i = 0; argv[i]; i++) {
-      if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
-        int append = (argv[i][1] == '>');
-        argv[i] = NULL;
-        int fd = open(argv[i + 1],
-                      O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC), 0644);
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-      } else if (strcmp(argv[i], "<") == 0) {
-        argv[i] = NULL;
-        int fd = open(argv[i + 1], O_RDONLY);
-        dup2(fd, STDIN_FILENO);
-        close(fd);
-      }
-    }
-
-    execvp(argv[0], argv);
-    perror("execvp");
+    // Child process
+    execvp(args[0], args);
+    perror(args[0]);
     exit(1);
   } else if (pid > 0) {
-    if (has_pipe) {
-      close(pipefd[1]);
-      pid_t pid2 = fork();
-      if (pid2 == 0) {
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
-        run_command(&argv[split + 1]);
-        exit(0);
-      }
-      close(pipefd[0]);
-      waitpid(pid, NULL, 0);
-      waitpid(pid2, NULL, 0);
-    } else {
-      waitpid(pid, NULL, 0);
-    }
+    // Parent process - wait for child
+    int status;
+    waitpid(pid, &status, 0);
   } else {
     perror("fork");
   }
 }
 
 // =====================
-// Condition evaluation (numeric + string)
-// =====================
-int eval_condition(const char *cond) {
-  char *expanded = expand_variables(cond);
-  char left[256], op[3], right[256];
-  int result = 0;
-
-  if (sscanf(expanded, "%255s %2s %255s", left, op, right) == 3) {
-    char *endptr1, *endptr2;
-    long a = strtol(left, &endptr1, 10);
-    long b = strtol(right, &endptr2, 10);
-    int numeric = (*endptr1 == '\0' && *endptr2 == '\0');
-
-    if (numeric) {
-      if (strcmp(op, "==") == 0)
-        result = (a == b);
-      else if (strcmp(op, "!=") == 0)
-        result = (a != b);
-      else if (strcmp(op, "<") == 0)
-        result = (a < b);
-      else if (strcmp(op, "<=") == 0)
-        result = (a <= b);
-      else if (strcmp(op, ">") == 0)
-        result = (a > b);
-      else if (strcmp(op, ">=") == 0)
-        result = (a >= b);
-    } else {
-      if (strcmp(op, "==") == 0)
-        result = (strcmp(left, right) == 0);
-      else if (strcmp(op, "!=") == 0)
-        result = (strcmp(left, right) != 0);
-    }
-  } else if (strcasecmp(expanded, "true") == 0)
-    result = 1;
-  else if (strcasecmp(expanded, "false") == 0)
-    result = 0;
-
-  free(expanded);
-  return result;
-}
-
-// =====================
-// Flow control one-liners
+// Control Flow Execution
 // =====================
 void execute_flow(const char *line) {
-  if (strncmp(line, "repeat-until", 12) == 0) {
-    printf("repeat-until is buggy at best, only works for single command... no "
-           "idea why. Fix later.");
-    // TODO: FIX
+  if (!line || !*line)
+    return;
 
-    // Create a modifiable copy of the input line
+  // Skip leading whitespace
+  while (isspace((unsigned char)*line))
+    line++;
+
+  if (!*line)
+    return;
+
+  // While loop
+  if (strncmp(line, "while ", 6) == 0) {
     char *line_copy = strdup(line);
-    if (!line_copy) {
-      perror("strdup");
+    if (!line_copy)
       return;
-    }
 
-    // Skip "repeat-until "
-    char *p = line_copy + 12;
+    char *p = line_copy + 6;
     while (isspace((unsigned char)*p))
       p++;
 
-    // Check for (
     if (*p != '(') {
-      fprintf(stderr, "Syntax error: expected '('\n");
       free(line_copy);
       return;
     }
-    p++; // Skip '('
 
-    // Find closing ')'
+    p++;
     char *cond_start = p;
     char *cond_end = strchr(p, ')');
+
     if (!cond_end) {
-      fprintf(stderr, "Syntax error: expected ')'\n");
       free(line_copy);
       return;
     }
-    *cond_end = '\0'; // Null-terminate condition
 
-    // Extract condition and commands
+    *cond_end = '\0';
     char *cond_str = strdup(cond_start);
-    if (!cond_str) {
-      perror("strdup");
-      free(line_copy);
-      return;
-    }
-
     char *commands_start = cond_end + 1;
+
     while (isspace((unsigned char)*commands_start))
       commands_start++;
 
     char *commands_str = strdup(commands_start);
-    if (!commands_str) {
-      perror("strdup");
-      free(line_copy);
-      free(cond_str);
-      return;
-    }
 
-    // Loop until condition is true
+    // Execute while loop
     while (1) {
-      // Execute commands block (split by ;)
-      if (*commands_str) {
-        char *cmd_copy = strdup(commands_str);
-        if (!cmd_copy) {
-          perror("strdup");
-          break;
-        }
-
-        char *part = strtok(cmd_copy, ";");
-        while (part) {
-          // Trim leading/trailing whitespace
-          char *start = part;
-          while (isspace((unsigned char)*start))
-            start++;
-
-          char *end = start + strlen(start) - 1;
-          while (end > start && isspace((unsigned char)*end))
-            end--;
-          *(end + 1) = '\0';
-
-          if (*start) {
-            // Check if this is a variable assignment first
-            if (is_variable_assignment(start)) {
-              char *subbed = substitute_commands(start);
-              char *expanded = expand_variables(subbed);
-              free(subbed);
-              handle_assignment(expanded);
-              free(expanded);
-            } else {
-              char *subbed = substitute_commands(start);
-              char *expanded = expand_variables(subbed);
-              free(subbed);
-
-              char **tokens = tokenize(expanded);
-              if (tokens && tokens[0]) {
-                char **globbed = expand_globs(tokens);
-                run_command(globbed);
-                free_tokens(globbed);
-              }
-              free_tokens(tokens);
-              free(expanded);
-            }
-          }
-
-          part = strtok(NULL, ";");
-        }
-        free(cmd_copy);
-      }
-
-      // Evaluate condition after executing
       char *expanded_cond = expand_variables(cond_str);
-      int condition_result = eval_condition(expanded_cond);
-      free(expanded_cond);
-
-      if (condition_result) {
+      if (!eval_condition(expanded_cond)) {
+        free(expanded_cond);
         break;
       }
+      free(expanded_cond);
+
+      // Execute commands
+      char *cmd_copy = strdup(commands_str);
+      char *part = strtok(cmd_copy, ";");
+      while (part) {
+        trim_string(part);
+        if (*part) {
+          char *subbed = substitute_commands(part);
+          char *expanded = expand_variables(subbed);
+          free(subbed);
+
+          if (is_variable_assignment(expanded)) {
+            handle_assignment(expanded);
+          } else {
+            char **tokens = tokenize(expanded);
+            if (tokens && tokens[0]) {
+              char **globbed = expand_globs(tokens);
+              run_command(globbed);
+              free_tokens(globbed);
+            } else {
+              free_tokens(tokens);
+            }
+          }
+          free(expanded);
+        }
+        part = strtok(NULL, ";");
+      }
+      free(cmd_copy);
     }
 
-    // Cleanup
     free(commands_str);
     free(cond_str);
     free(line_copy);
+  }
+  // If statement
+  else if (strncmp(line, "if ", 3) == 0) {
+    char *line_copy = strdup(line);
+    if (!line_copy)
+      return;
 
-  } else if (strncmp(line, "repeat ", 7) == 0) {
+    char cond[256], then_cmd[512];
+    if (sscanf(line_copy, "if (%255[^)]) %511[^\n]", cond, then_cmd) != 2) {
+      free(line_copy);
+      return;
+    }
+
+    char *expanded_cond = expand_variables(cond);
+    int condition_result = eval_condition(expanded_cond);
+    free(expanded_cond);
+
+    if (condition_result) {
+      char *subbed = substitute_commands(then_cmd);
+      char *expanded = expand_variables(subbed);
+      free(subbed);
+
+      if (is_variable_assignment(expanded)) {
+        handle_assignment(expanded);
+      } else {
+        char **tokens = tokenize(expanded);
+        if (tokens && tokens[0]) {
+          char **globbed = expand_globs(tokens);
+          run_command(globbed);
+          free_tokens(globbed);
+        } else {
+          free_tokens(tokens);
+        }
+      }
+      free(expanded);
+    }
+
+    free(line_copy);
+  }
+  // Repeat statement
+  else if (strncmp(line, "repeat ", 7) == 0) {
     int times;
     char commands[1024];
     if (sscanf(line, "repeat %d %1023[^\n]", &times, commands) == 2) {
@@ -592,117 +763,50 @@ void execute_flow(const char *line) {
         char *cmd_copy = strdup(commands);
         char *part = strtok(cmd_copy, ";");
         while (part) {
-          // Remove leading/trailing whitespace from command
-          while (*part == ' ')
-            part++;
-          char *end = part + strlen(part) - 1;
-          while (end > part && *end == ' ')
-            end--;
-          *(end + 1) = '\0';
+          trim_string(part);
+          if (*part) {
+            char *subbed = substitute_commands(part);
+            char *expanded = expand_variables(subbed);
+            free(subbed);
 
-          if (strlen(part) > 0) {
-            // Check if this is a variable assignment
-            if (is_variable_assignment(part)) {
-              char *subbed = substitute_commands(part);
-              char *expanded = expand_variables(subbed);
-              free(subbed);
+            if (is_variable_assignment(expanded)) {
               handle_assignment(expanded);
-              free(expanded);
             } else {
-              char *subbed = substitute_commands(part);
-              char *expanded = expand_variables(subbed);
-              free(subbed);
-
               char **tokens = tokenize(expanded);
               if (tokens && tokens[0]) {
                 char **globbed = expand_globs(tokens);
                 run_command(globbed);
                 free_tokens(globbed);
+              } else {
+                free_tokens(tokens);
               }
-              free_tokens(tokens);
-              free(expanded);
             }
+            free(expanded);
           }
-
           part = strtok(NULL, ";");
         }
         free(cmd_copy);
       }
     }
-  } else if (strncmp(line, "if", 2) == 0) {
-    // Make a copy since we need to modify the string
-    char *line_copy = strdup(line);
-    char *else_pos = strstr(line_copy, "; else");
-    if (else_pos) {
-      *else_pos = '\0';
-      char *else_cmd = else_pos + 6;
-      char cond[256], then_cmd[512];
-      if (sscanf(line_copy, "if (%255[^)]) %511[^\n]", cond, then_cmd) == 2) {
-        // Re-expand condition in case it contains variables
-        char *expanded_cond = expand_variables(cond);
-        if (eval_condition(expanded_cond)) {
-          free(expanded_cond);
-          char *subbed = substitute_commands(then_cmd);
-          char *expanded = expand_variables(subbed);
-          free(subbed);
-          char **tokens = tokenize(expanded);
-          if (tokens && tokens[0]) {
-            char **globbed = expand_globs(tokens);
-            run_command(globbed);
-            free_tokens(globbed);
-          }
-          free_tokens(tokens);
-          free(expanded);
-        } else {
-          free(expanded_cond);
-          char *subbed = substitute_commands(else_cmd);
-          char *expanded = expand_variables(subbed);
-          free(subbed);
-          char **tokens = tokenize(expanded);
-          if (tokens && tokens[0]) {
-            char **globbed = expand_globs(tokens);
-            run_command(globbed);
-            free_tokens(globbed);
-          }
-          free_tokens(tokens);
-          free(expanded);
-        }
-      }
-    } else {
-      // Handle if without else
-      char cond[256], then_cmd[512];
-      if (sscanf(line_copy, "if (%255[^)]) %511[^\n]", cond, then_cmd) == 2) {
-        char *expanded_cond = expand_variables(cond);
-        if (eval_condition(expanded_cond)) {
-          free(expanded_cond);
-          char *subbed = substitute_commands(then_cmd);
-          char *expanded = expand_variables(subbed);
-          free(subbed);
-          char **tokens = tokenize(expanded);
-          if (tokens && tokens[0]) {
-            char **globbed = expand_globs(tokens);
-            run_command(globbed);
-            free_tokens(globbed);
-          }
-          free_tokens(tokens);
-          free(expanded);
-        } else {
-          free(expanded_cond);
-        }
-      }
-    }
-    free(line_copy);
-  } else {
+  }
+  // Regular command
+  else {
     char *subbed = substitute_commands(line);
     char *expanded = expand_variables(subbed);
     free(subbed);
-    char **tokens = tokenize(expanded);
-    if (tokens && tokens[0]) {
-      char **globbed = expand_globs(tokens);
-      run_command(globbed);
-      free_tokens(globbed);
+
+    if (is_variable_assignment(expanded)) {
+      handle_assignment(expanded);
+    } else {
+      char **tokens = tokenize(expanded);
+      if (tokens && tokens[0]) {
+        char **globbed = expand_globs(tokens);
+        run_command(globbed);
+        free_tokens(globbed);
+      } else {
+        free_tokens(tokens);
+      }
     }
-    free_tokens(tokens);
     free(expanded);
   }
 }
@@ -711,16 +815,19 @@ void execute_flow(const char *line) {
 // Main
 // =====================
 int main(void) {
-  printf("Asterix SHell, v0.8\n");
+  printf("Asterix SHell, v0.9\n");
 
 #ifndef EDITLINE_ENABLED
   using_history();
 #endif
 
+  atexit(free_vars);
+
   while (1) {
     char *input = readline("asterix> ");
     if (!input)
       break;
+
     if (strcasecmp(input, "quit") == 0 || strcasecmp(input, "exit") == 0) {
       free(input);
       break;

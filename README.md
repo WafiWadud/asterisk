@@ -13,7 +13,7 @@ A lightweight, feature-rich shell implementation written in C.
   - `if (condition) command` and `if (condition) command; else other_command`
   - `while (condition) commands` for loops until condition becomes true
   - `repeat N commands` to execute commands N times
-- **Input/Output Redirection**: 
+- **Input/Output Redirection**:
   - `>` for output redirection (truncate)
   - `>>` for output redirection (append)
   - `<` for input redirection
@@ -26,31 +26,37 @@ A lightweight, feature-rich shell implementation written in C.
 ### Linux
 
 **Requirements:**
+
 - GCC or Clang
 - GNU Readline development library (`readline-devel` or `libreadline-dev`)
 - OR Editline development library (`libedit-dev`) for a lighter alternative
 
 **Compile with GNU Readline:**
+
 ```bash
 gcc -o ash shell.c -lreadline
 ```
 
 **Compile with Editline:**
+
 ```bash
 gcc -DEDITLINE_ENABLED -o ash shell.c -leditline
 ```
 
 Or with additional debugging:
+
 ```bash
 gcc -g -Wall -o ash shell.c -lreadline
 ```
 
 Or with Editline and debugging:
+
 ```bash
 gcc -g -Wall -DEDITLINE_ENABLED -o ash shell.c -leditline
 ```
 
 **Run:**
+
 ```bash
 ./ash
 ```
@@ -58,10 +64,12 @@ gcc -g -Wall -DEDITLINE_ENABLED -o ash shell.c -leditline
 ### Windows
 
 **Requirements:**
+
 - MinGW-w64 or similar GCC toolchain
 - GNU Readline compiled for Windows (or use a compatible alternative)
 
 **Compile with MinGW:**
+
 ```bash
 gcc -o ash.exe shell.c -lreadline
 ```
@@ -70,6 +78,7 @@ gcc -o ash.exe shell.c -lreadline
 If readline is not available on Windows, you may need to modify the code to use Windows-specific console APIs or use a readline replacement compatible with Windows.
 
 **Run:**
+
 ```bash
 ash.exe
 ```
@@ -77,6 +86,7 @@ ash.exe
 ## Usage
 
 Start the shell:
+
 ```bash
 ./ash
 ```
@@ -84,6 +94,7 @@ Start the shell:
 ### Examples
 
 **Variable assignment and expansion:**
+
 ```
 asterix> x=42
 asterix> echo $x
@@ -93,6 +104,7 @@ asterix> echo ${x}
 ```
 
 **Arithmetic:**
+
 ```
 asterix> result=$[10 + 5 * 2]
 asterix> echo $result
@@ -100,23 +112,27 @@ asterix> echo $result
 ```
 
 **Command substitution:**
+
 ```
 asterix> echo `date`
 asterix> files=$(ls -la)
 ```
 
 **Loops:**
+
 ```
 asterix> while (x<5) echo $x; x=$[x+1]
 asterix> repeat 3 echo "Hello"
 ```
 
 **Conditional execution:**
+
 ```
 asterix> if (x > 10) echo "Large"; else echo "Small"
 ```
 
 **Piping and redirection:**
+
 ```
 asterix> ls | grep shell
 asterix> echo "test" > output.txt
@@ -124,6 +140,7 @@ asterix> cat < input.txt
 ```
 
 **Exit:**
+
 ```
 asterix> quit
 asterix> exit
@@ -131,4 +148,4 @@ asterix> exit
 
 ## Version
 
-Asterix Shell v0.8
+Asterix Shell v0.9
