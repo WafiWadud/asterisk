@@ -21,6 +21,10 @@
 #include <readline/readline.h>
 #endif
 
+#ifdef MIMALLOC_ENABLED
+#include <mimalloc-override.h>
+#endif
+
 // =====================
 // Macros & Constants
 // =====================
